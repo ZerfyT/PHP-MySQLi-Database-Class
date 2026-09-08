@@ -569,29 +569,31 @@ class MysqliDb
      */
     public function rawQuery($query, $bindParams = null)
     {
-        $query = $this->rawAddPrefix($query);
-        $params = array(''); // Create the empty 0 index
-        $this->_query = $query;
-        $stmt = $this->_prepareQuery();
+        try {
+            $query = $this->rawAddPrefix($query);
+            $params = array(''); // Create the empty 0 index
+            $this->_query = $query;
+            $stmt = $this->_prepareQuery();
 
-        if (is_array($bindParams) === true) {
-            foreach ($bindParams as $prop => $val) {
-                $params[0] .= $this->_determineType($val);
-                array_push($params, $bindParams[$prop]);
+            if (is_array($bindParams) === true) {
+                foreach ($bindParams as $prop => $val) {
+                    $params[0] .= $this->_determineType($val);
+                    array_push($params, $bindParams[$prop]);
+                }
+
+                call_user_func_array(array($stmt, 'bind_param'), $this->refValues($params));
             }
 
-            call_user_func_array(array($stmt, 'bind_param'), $this->refValues($params));
+            $stmt->execute();
+            $this->count = $stmt->affected_rows;
+            $this->_stmtError = $stmt->error;
+            $this->_stmtErrno = $stmt->errno;
+            $this->_lastQuery = $this->replacePlaceHolders($this->_query, $params);
+            $res = $this->_dynamicBindResults($stmt);
+            return $res;
+        } finally {
+            $this->reset();
         }
-
-        $stmt->execute();
-        $this->count = $stmt->affected_rows;
-        $this->_stmtError = $stmt->error;
-        $this->_stmtErrno = $stmt->errno;
-        $this->_lastQuery = $this->replacePlaceHolders($this->_query, $params);
-        $res = $this->_dynamicBindResults($stmt);
-        $this->reset();
-
-        return $res;
     }
 
     /**
@@ -657,15 +659,17 @@ class MysqliDb
      */
     public function query($query, $numRows = null)
     {
-        $this->_query = $query;
-        $stmt = $this->_buildQuery($numRows);
-        $stmt->execute();
-        $this->_stmtError = $stmt->error;
-        $this->_stmtErrno = $stmt->errno;
-        $res = $this->_dynamicBindResults($stmt);
-        $this->reset();
-
-        return $res;
+        try {
+            $this->_query = $query;
+            $stmt = $this->_buildQuery($numRows);
+            $stmt->execute();
+            $this->_stmtError = $stmt->error;
+            $this->_stmtErrno = $stmt->errno;
+            $res = $this->_dynamicBindResults($stmt);
+            return $res;
+        } finally {
+            $this->reset();
+        }
     }
 
     /**
@@ -733,33 +737,35 @@ class MysqliDb
      */
     public function get($tableName, $numRows = null, $columns = '*')
     {
-        if (empty($columns)) {
-            $columns = '*';
+        try {
+            if (empty($columns)) {
+                $columns = '*';
+            }
+
+            $column = is_array($columns) ? implode(', ', $columns) : $columns;
+
+            if (strpos($tableName, '.') === false) {
+                $this->_tableName = self::$prefix . $tableName;
+            } else {
+                $this->_tableName = $tableName;
+            }
+
+            $this->_query = 'SELECT ' . implode(' ', $this->_queryOptions) . ' ' .
+                $column . " FROM " . $this->_tableName;
+            $stmt = $this->_buildQuery($numRows);
+
+            if ($this->isSubQuery) {
+                return $this;
+            }
+
+            $stmt->execute();
+            $this->_stmtError = $stmt->error;
+            $this->_stmtErrno = $stmt->errno;
+            $res = $this->_dynamicBindResults($stmt);
+            return $res;
+        } finally {
+            $this->reset();
         }
-
-        $column = is_array($columns) ? implode(', ', $columns) : $columns;
-
-        if (strpos($tableName, '.') === false) {
-            $this->_tableName = self::$prefix . $tableName;
-        } else {
-            $this->_tableName = $tableName;
-        }
-
-        $this->_query = 'SELECT ' . implode(' ', $this->_queryOptions) . ' ' .
-            $column . " FROM " . $this->_tableName;
-        $stmt = $this->_buildQuery($numRows);
-
-        if ($this->isSubQuery) {
-            return $this;
-        }
-
-        $stmt->execute();
-        $this->_stmtError = $stmt->error;
-        $this->_stmtErrno = $stmt->errno;
-        $res = $this->_dynamicBindResults($stmt);
-        $this->reset();
-
-        return $res;
     }
 
     /**
@@ -916,20 +922,24 @@ class MysqliDb
      */
     public function update($tableName, $tableData, $numRows = null)
     {
-        if ($this->isSubQuery) {
-            return;
+        try {
+            if ($this->isSubQuery) {
+                return;
+            }
+
+            $this->_query = "UPDATE " . self::$prefix . $tableName;
+
+            $stmt = $this->_buildQuery($numRows, $tableData);
+            $status = $stmt->execute();
+            $this->reset();
+            $this->_stmtError = $stmt->error;
+            $this->_stmtErrno = $stmt->errno;
+            $this->count = $stmt->affected_rows;
+
+            return $status;
+        } finally {
+            $this->reset();
         }
-
-        $this->_query = "UPDATE " . self::$prefix . $tableName;
-
-        $stmt = $this->_buildQuery($numRows, $tableData);
-        $status = $stmt->execute();
-        $this->reset();
-        $this->_stmtError = $stmt->error;
-        $this->_stmtErrno = $stmt->errno;
-        $this->count = $stmt->affected_rows;
-
-        return $status;
     }
 
     /**
@@ -946,31 +956,33 @@ class MysqliDb
      */
     public function delete($tableName, $numRows = null)
     {
-        if ($this->isSubQuery) {
-            throw new Exception('Delete function cannot be used within a subquery context.');
+        try {
+            if ($this->isSubQuery) {
+                throw new Exception('Delete function cannot be used within a subquery context.');
+            }
+
+
+            $table = self::$prefix . $tableName;
+
+            if (count($this->_join)) {
+                $this->_query = "DELETE " . preg_replace('/.* (.*)/', '$1', $table) . " FROM " . $table;
+            } else {
+                $this->_query = "DELETE FROM " . $table;
+            }
+
+            $stmt = $this->_buildQuery($numRows);
+
+            // Error handling
+            if (!$stmt->execute()) {
+                throw new Exception('Failed to execute delete operation: ' . $this->_stmtError);
+            }
+            $this->_stmtError = $stmt->error;
+            $this->_stmtErrno = $stmt->errno;
+            $this->count = $stmt->affected_rows;
+            return ($stmt->affected_rows >= 0); // anything greater than -1 indicates success
+        } finally {
+            $this->reset();
         }
-        
-
-        $table = self::$prefix . $tableName;
-
-        if (count($this->_join)) {
-            $this->_query = "DELETE " . preg_replace('/.* (.*)/', '$1', $table) . " FROM " . $table;
-        } else {
-            $this->_query = "DELETE FROM " . $table;
-        }
-
-        $stmt = $this->_buildQuery($numRows);
-
-        // Error handling
-        if (!$stmt->execute()) {
-            throw new Exception('Failed to execute delete operation: ' . $this->_stmtError);
-        }
-        $this->_stmtError = $stmt->error;
-        $this->_stmtErrno = $stmt->errno;
-        $this->count = $stmt->affected_rows;
-        $this->reset();
-
-        return ($stmt->affected_rows >= 0); // anything greater than -1 indicates success
     }
 
     /**
@@ -1325,52 +1337,53 @@ class MysqliDb
      * @return bool if succeeded;
      * @throws Exception
      */
-	public function lock($table)
-	{
-		// Main Query
-		$this->_query = "LOCK TABLES";
+    public function lock($table)
+    {
+        try {
+            // Main Query
+            $this->_query = "LOCK TABLES";
 
-		// Is the table an array?
-		if(gettype($table) == "array") {
-			// Loop trough it and attach it to the query
-			foreach($table as $key => $value) {
-				if(gettype($value) == "string") {
-					if($key > 0) {
-						$this->_query .= ",";
-					}
-					$this->_query .= " ".self::$prefix.$value." ".$this->_tableLockMethod;
-				}
-			}
-		}
-		else{
-			// Build the table prefix
-			$table = self::$prefix . $table;
+            // Is the table an array?
+            if (gettype($table) == "array") {
+                // Loop trough it and attach it to the query
+                foreach ($table as $key => $value) {
+                    if (gettype($value) == "string") {
+                        if ($key > 0) {
+                            $this->_query .= ",";
+                        }
+                        $this->_query .= " " . self::$prefix . $value . " " . $this->_tableLockMethod;
+                    }
+                }
+            } else {
+                // Build the table prefix
+                $table = self::$prefix . $table;
 
-			// Build the query
-			$this->_query = "LOCK TABLES ".$table." ".$this->_tableLockMethod;
-		}
+                // Build the query
+                $this->_query = "LOCK TABLES " . $table . " " . $this->_tableLockMethod;
+            }
 
-		// Execute the query unprepared because LOCK only works with unprepared statements.
-		$result = $this->queryUnprepared($this->_query);
-        $errno  = $this->mysqli()->errno;
+            // Execute the query unprepared because LOCK only works with unprepared statements.
+            $result = $this->queryUnprepared($this->_query);
+            $errno = $this->mysqli()->errno;
 
-		// Reset the query
-		$this->reset();
+            // Are there rows modified?
+            if ($result) {
+                // Return true
+                // We can't return ourself because if one table gets locked, all other ones get unlocked!
+                return true;
+            }
+            // Something went wrong
+            else {
+                throw new Exception("Locking of table " . $table . " failed", $errno);
+            }
 
-		// Are there rows modified?
-		if($result) {
-			// Return true
-			// We can't return ourself because if one table gets locked, all other ones get unlocked!
-			return true;
-		}
-		// Something went wrong
-		else {
-			throw new Exception("Locking of table ".$table." failed", $errno);
-		}
-
-		// Return the success value
-		return false;
-	}
+            // Return the success value
+            return false;
+        } finally {
+            // Reset the query
+            $this->reset();
+        }
+    }
 
     /**
      * Unlocks all tables in a database.
@@ -1380,32 +1393,34 @@ class MysqliDb
      * @return MysqliDb
      * @throws Exception
      */
-	public function unlock()
-	{
-		// Build the query
-		$this->_query = "UNLOCK TABLES";
+    public function unlock()
+    {
+        try {
+            // Build the query
+            $this->_query = "UNLOCK TABLES";
 
-		// Execute the query unprepared because UNLOCK and LOCK only works with unprepared statements.
-		$result = $this->queryUnprepared($this->_query);
-        $errno  = $this->mysqli()->errno;
+            // Execute the query unprepared because UNLOCK and LOCK only works with unprepared statements.
+            $result = $this->queryUnprepared($this->_query);
+            $errno = $this->mysqli()->errno;
 
-		// Reset the query
-		$this->reset();
-
-		// Are there rows modified?
-		if($result) {
-			// return self
-			return $this;
-		}
-		// Something went wrong
-		else {
-			throw new Exception("Unlocking of tables failed", $errno);
-		}
+            // Are there rows modified?
+            if ($result) {
+                // return self
+                return $this;
+            }
+            // Something went wrong
+            else {
+                throw new Exception("Unlocking of tables failed", $errno);
+            }
 
 
-		// Return self
-		return $this;
-	}
+            // Return self
+            return $this;
+        } finally {
+            // Reset the query
+            $this->reset();
+        }
+    }
 
 
     /**
@@ -1538,32 +1553,35 @@ class MysqliDb
      */
     private function _buildInsert($tableName, $insertData, $operation)
     {
-        if ($this->isSubQuery) {
-            return;
-        }
-
-        $this->_query = $operation . " " . implode(' ', $this->_queryOptions) . " INTO " . self::$prefix . $tableName;
-        $stmt = $this->_buildQuery(null, $insertData);
-        $status = $stmt->execute();
-        $this->_stmtError = $stmt->error;
-        $this->_stmtErrno = $stmt->errno;
-        $haveOnDuplicate = !empty ($this->_updateColumns);
-        $this->reset();
-        $this->count = $stmt->affected_rows;
-
-        if ($stmt->affected_rows < 1) {
-            // in case of onDuplicate() usage, if no rows were inserted
-            if ($status && $haveOnDuplicate) {
-                return true;
+        try {
+            if ($this->isSubQuery) {
+                return;
             }
-            return false;
-        }
 
-        if ($stmt->insert_id > 0) {
-            return $stmt->insert_id;
-        }
+            $this->_query = $operation . " " . implode(' ', $this->_queryOptions) . " INTO " . self::$prefix . $tableName;
+            $stmt = $this->_buildQuery(null, $insertData);
+            $status = $stmt->execute();
+            $this->_stmtError = $stmt->error;
+            $this->_stmtErrno = $stmt->errno;
+            $haveOnDuplicate = !empty($this->_updateColumns);
+            $this->count = $stmt->affected_rows;
 
-        return true;
+            if ($stmt->affected_rows < 1) {
+                // in case of onDuplicate() usage, if no rows were inserted
+                if ($status && $haveOnDuplicate) {
+                    return true;
+                }
+                return false;
+            }
+
+            if ($stmt->insert_id > 0) {
+                return $stmt->insert_id;
+            }
+
+            return true;
+        } finally {
+            $this->reset();
+        }
     }
 
     /**
